@@ -114,7 +114,6 @@ public class Game : MonoBehaviour
 		yield return null; 
 	}
 
-	// Use this for initialization
 	void Start ()
 	{
 		dropdown.ClearOptions ();

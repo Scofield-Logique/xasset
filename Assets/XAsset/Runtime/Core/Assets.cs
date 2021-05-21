@@ -50,7 +50,6 @@ namespace libx
             Debug.Log(string.Format("{0}{1}", TAG, s));
         }
 
-        #region API
 
         /// <summary>
         /// 读取所有资源路径
@@ -67,10 +66,19 @@ namespace libx
 
         public static string updatePath { get; set; } 
 
-        public static void AddSearchPath(string path)
+
+
+        public static void Clear()
         { 
-            _searchPaths.Add(path);
+            _searchPaths.Clear();
+            _activeVariants.Clear();
+            _assetToBundles.Clear();
+            _bundleToDependencies.Clear();
         }
+
+        
+
+
 
         public static ManifestRequest Initialize()
         {
@@ -102,13 +110,43 @@ namespace libx
             return request;
         }
 
-        public static void Clear()
-        { 
-            _searchPaths.Clear();
-            _activeVariants.Clear();
-            _assetToBundles.Clear();
-            _bundleToDependencies.Clear();
+        internal static void OnLoadManifest(Manifest manifest)
+        {
+            _activeVariants.AddRange(manifest.activeVariants); 
+            
+            var assets = manifest.assets;
+            var dirs = manifest.dirs;
+            var bundles = manifest.bundles;
+
+            foreach (var item in bundles)
+                _bundleToDependencies[item.name] = Array.ConvertAll(item.deps, id => bundles[id].name);
+
+            foreach (var item in assets)
+            {
+                var path = string.Format("{0}/{1}", dirs[item.dir], item.name);
+                if (item.bundle >= 0 && item.bundle < bundles.Length)
+                {
+                    _assetToBundles[path] = bundles[item.bundle].name;
+                }
+                else
+                {
+                    Debug.LogError(string.Format("{0} bundle {1} not exist.", path, item.bundle));
+                }
+            }
         }
+
+
+
+
+        private void Update()
+        {
+            UpdateAssets();
+            UpdateScene();
+            UpdateBundles();
+        }
+
+        #region Scene
+        private static List<SceneAssetRequest> _scenes = new List<SceneAssetRequest>();
 
         private static SceneAssetRequest _runningScene;
         
@@ -143,66 +181,30 @@ namespace libx
             scene.Release();
         }
 
-        public static AssetRequest LoadAssetAsync(string path, Type type)
+        
+        static void UpdateScene()
         {
-            return LoadAsset(path, type, true);
-        }
-
-        public static AssetRequest LoadAsset(string path, Type type)
-        {
-            return LoadAsset(path, type, false);
-        }
-
-        public static void UnloadAsset(AssetRequest asset)
-        {
-            asset.Release();
-        }
-
-        #endregion
-
-        #region Private
-
-        internal static void OnLoadManifest(Manifest manifest)
-        {
-            _activeVariants.AddRange(manifest.activeVariants); 
-            
-            var assets = manifest.assets;
-            var dirs = manifest.dirs;
-            var bundles = manifest.bundles;
-
-            foreach (var item in bundles)
-                _bundleToDependencies[item.name] = Array.ConvertAll(item.deps, id => bundles[id].name);
-
-            foreach (var item in assets)
+            //-------scene
+            for (var i = 0; i < _scenes.Count; ++i)
             {
-                var path = string.Format("{0}/{1}", dirs[item.dir], item.name);
-                if (item.bundle >= 0 && item.bundle < bundles.Length)
-                {
-                    _assetToBundles[path] = bundles[item.bundle].name;
-                }
-                else
-                {
-                    Debug.LogError(string.Format("{0} bundle {1} not exist.", path, item.bundle));
-                }
+                var request = _scenes[i];
+                if (request.Update() || !request.IsUnused())
+                    continue;
+                _scenes.RemoveAt(i);
+                Log(string.Format("UnloadScene:{0}", request.name));
+                request.Unload();
+                --i;
             }
         }
+        #endregion
 
+        #region Asset
         private static Dictionary<string, AssetRequest> _assets = new Dictionary<string, AssetRequest>();
-
         private static List<AssetRequest> _loadingAssets = new List<AssetRequest>();
-
-        private static List<SceneAssetRequest> _scenes = new List<SceneAssetRequest>();
-
         private static List<AssetRequest> _unusedAssets = new List<AssetRequest>();
-
-        private void Update()
-        {
-            UpdateAssets();
-            UpdateBundles();
-        }
-
         private static void UpdateAssets()
         {
+            //--------检查loading 资源
             for (var i = 0; i < _loadingAssets.Count; ++i)
             {
                 var request = _loadingAssets[i];
@@ -212,6 +214,8 @@ namespace libx
                 --i;
             }
 
+
+            //----------检查unused资源
             foreach (var item in _assets)
             {
                 if (item.Value.isDone && item.Value.IsUnused())
@@ -231,17 +235,6 @@ namespace libx
                 } 
                 _unusedAssets.Clear();
             }
-
-            for (var i = 0; i < _scenes.Count; ++i)
-            {
-                var request = _scenes[i];
-                if (request.Update() || !request.IsUnused())
-                    continue;
-                _scenes.RemoveAt(i);
-                Log(string.Format("UnloadScene:{0}", request.name));
-                request.Unload(); 
-                --i;
-            }
         }
 
         private static void AddAssetRequest(AssetRequest request)
@@ -250,6 +243,17 @@ namespace libx
             _loadingAssets.Add(request);
             request.Load();
         }
+
+        public static AssetRequest LoadAssetAsync(string path, Type type)
+        {
+            return LoadAsset(path, type, true);
+        }
+
+        public static AssetRequest LoadAsset(string path, Type type)
+        {
+            return LoadAsset(path, type, false);
+        }
+
 
         private static AssetRequest LoadAsset(string path, Type type, bool async)
         {
@@ -261,14 +265,17 @@ namespace libx
 
             path = GetExistPath(path);
 
+            //-------已经存在的asset
             AssetRequest request;
             if (_assets.TryGetValue(path, out request))
             {
-                request.Retain();
+                request.Retain();   
                 _loadingAssets.Add(request);
                 return request;
             }
 
+
+            //--------新的asset
             string assetBundleName;
             if (GetAssetBundleName(path, out assetBundleName))
             {
@@ -296,9 +303,17 @@ namespace libx
             return request;
         }
 
+        public static void UnloadAsset(AssetRequest asset)
+        {
+            asset.Release();
+        }
         #endregion
 
         #region Paths
+        public static void AddSearchPath(string path)
+        { 
+            _searchPaths.Add(path);
+        }
 
         private static List<string> _searchPaths = new List<string>();
 
@@ -337,22 +352,26 @@ namespace libx
 
         #endregion
 
-        #region Bundles
 
+
+        #region Bundles
         private static readonly int MAX_BUNDLES_PERFRAME = 0;
 
         private static Dictionary<string, BundleRequest> _bundles = new Dictionary<string, BundleRequest>();
+
+        private static List<BundleRequest> _toloadBundles = new List<BundleRequest>();
 
         private static List<BundleRequest> _loadingBundles = new List<BundleRequest>();
 
         private static List<BundleRequest> _unusedBundles = new List<BundleRequest>();
 
-        private static List<BundleRequest> _toloadBundles = new List<BundleRequest>();
 
         private static List<string> _activeVariants = new List<string>();
 
+        //key:path value:bundleName
         private static Dictionary<string, string> _assetToBundles = new Dictionary<string, string>();
 
+        //key:parent value:children
         private static Dictionary<string, string[]> _bundleToDependencies = new Dictionary<string, string[]>();
 
         internal static bool GetAssetBundleName(string path, out string assetBundleName)
@@ -369,20 +388,15 @@ namespace libx
             return new string[0];
         }
 
+
         internal static BundleRequest LoadBundle(string assetBundleName)
         {
             return LoadBundle(assetBundleName, false);
         }
-
         internal static BundleRequest LoadBundleAsync(string assetBundleName)
         {
             return LoadBundle(assetBundleName, true);
         }
-
-        internal static void UnloadBundle(BundleRequest bundle)
-        {
-            bundle.Release();
-        }  
 
         internal static BundleRequest LoadBundle(string assetBundleName, bool asyncMode)
         {
@@ -404,6 +418,8 @@ namespace libx
                 return bundle;
             }
 
+
+            //------------
             if (url.StartsWith("http://", StringComparison.Ordinal) ||
                 url.StartsWith("https://", StringComparison.Ordinal) ||
                 url.StartsWith("file://", StringComparison.Ordinal) ||
@@ -430,6 +446,14 @@ namespace libx
             return bundle;
         }
 
+
+        internal static void UnloadBundle(BundleRequest bundle)
+        {
+            bundle.Release();
+        }  
+
+
+
         private static string GetDataPath(string bundleName)
         {
             if (string.IsNullOrEmpty(updatePath))
@@ -443,6 +467,7 @@ namespace libx
 
         private static void UpdateBundles()
         {
+            //----toload=>loading
             var max = MAX_BUNDLES_PERFRAME;
             if (_toloadBundles.Count > 0 && max > 0 && _loadingBundles.Count < max)
                 for (var i = 0; i < Math.Min(max - _loadingBundles.Count, _toloadBundles.Count); ++i)
@@ -457,6 +482,7 @@ namespace libx
                     }
                 } 
 
+            
             for (var i = 0; i < _loadingBundles.Count; i++)
             {
                 var item = _loadingBundles[i];
@@ -466,6 +492,8 @@ namespace libx
                 --i;
             }
 
+
+            //-----
             foreach (var item in _bundles)
             {
                 if (item.Value.isDone && item.Value.IsUnused())
@@ -527,7 +555,6 @@ namespace libx
 
             return bestFitIndex != -1 ? bundlesWithVariant[bestFitIndex] : assetBundleName;
         }
-
         #endregion
     }
 }
